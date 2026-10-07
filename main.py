@@ -1,16 +1,25 @@
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import JSONResponse
 import cv2
 import numpy as np
 import os
+import tempfile
 
-from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import JSONResponse
+
+# ============================================================
+# STUDENT PHOTO ANALYZER
+# ============================================================
+
+app = FastAPI(
+    title="Student Photo Analyzer",
+    description="Automatic student photo validation API",
+    version="8.0"
+)
 
 
 # ============================================================
 # SETTINGS
 # ============================================================
-
-MODEL_PATH = "models/face_detection_yunet_2026may.onnx"
 
 FACE_SCORE_THRESHOLD = 0.6
 NMS_THRESHOLD = 0.3
@@ -30,11 +39,15 @@ MAX_TOP_MARGIN_RATIO = 0.40
 
 
 # ============================================================
-# FASTAPI
+# MODEL
 # ============================================================
 
-app = FastAPI(
-    title="Student Photo Analyzer"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+MODEL_PATH = os.path.join(
+    BASE_DIR,
+    "models",
+    "face_detection_yunet_2026may.onnx"
 )
 
 
@@ -44,11 +57,11 @@ app = FastAPI(
 
 if not os.path.exists(MODEL_PATH):
     raise FileNotFoundError(
-        f"YuNet model not found: {MODEL_PATH}"
+        "YuNet model not found: " + MODEL_PATH
     )
 
 
-detector = cv2.FaceDetectorYN_create(
+face_detector = cv2.FaceDetectorYN.create(
     MODEL_PATH,
     "",
     (320, 320),
@@ -59,458 +72,491 @@ detector = cv2.FaceDetectorYN_create(
 
 
 # ============================================================
-# FACE DETECTION
+# ROOT
+# ============================================================
+
+@app.get("/")
+def root():
+    return {
+        "status": "online",
+        "service": "Student Photo Analyzer",
+        "version": "8.0"
+    }
+
+
+# ============================================================
+# HELPER: FACE DETECTION
 # ============================================================
 
 def detect_faces(image):
-
     height, width = image.shape[:2]
 
-    detector.setInputSize(
-        (width, height)
-    )
+    face_detector.setInputSize((width, height))
 
-    _, detections = detector.detect(image)
+    _, faces = face_detector.detect(image)
 
-    if detections is None:
+    if faces is None:
         return []
 
-    return detections
+    return faces
 
 
 # ============================================================
-# WHITE PIXEL CHECK
+# HELPER: BACKGROUND SCORE
 # ============================================================
 
-def calculate_white_percentage(
-    region,
-    mask=None
+def calculate_background_score(image):
+    """
+    Calculates the percentage of pixels that look white-ish.
+
+    White-ish means:
+    brightness >= 190
+    AND
+    difference between strongest and weakest RGB channel <= 35
+    """
+
+    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    brightness = np.mean(rgb, axis=2)
+
+    color_difference = (
+        np.max(rgb, axis=2) -
+        np.min(rgb, axis=2)
+    )
+
+    white_mask = (
+        (brightness >= WHITE_BRIGHTNESS) &
+        (color_difference <= WHITE_COLOR_DIFFERENCE)
+    )
+
+    score = (
+        np.sum(white_mask) /
+        white_mask.size
+    ) * 100.0
+
+    return round(float(score), 2)
+
+
+# ============================================================
+# HELPER: CHECK FACE POSITION
+# ============================================================
+
+def check_horizontal_position(
+    face_x,
+    face_width,
+    image_width
 ):
+    face_center_x = face_x + (face_width / 2)
 
-    pixels = region.reshape(-1, 3)
+    image_center_x = image_width / 2
 
-    if mask is not None:
+    offset = abs(
+        face_center_x - image_center_x
+    ) / image_width
 
-        mask_flat = mask.reshape(-1)
+    passed = offset <= MAX_HORIZONTAL_OFFSET
 
-        pixels = pixels[
-            mask_flat > 0
-        ]
-
-    if len(pixels) == 0:
-        return None
-
-    brightness = np.mean(
-        pixels,
-        axis=1
-    )
-
-    brightest = np.max(
-        pixels,
-        axis=1
-    )
-
-    darkest = np.min(
-        pixels,
-        axis=1
-    )
-
-    difference = (
-        brightest - darkest
-    )
-
-    white = (
-        (brightness >= WHITE_BRIGHTNESS)
-        &
-        (difference <= WHITE_COLOR_DIFFERENCE)
-    )
-
-    return (
-        np.sum(white)
-        /
-        len(white)
-    ) * 100
+    return passed, offset
 
 
 # ============================================================
-# FACE MASK
+# HELPER: CHECK FACE SIZE
 # ============================================================
 
-def create_face_mask(
-    image,
-    detections
+def check_face_size(
+    face_width,
+    image_width
 ):
-
-    height, width = image.shape[:2]
-
-    mask = np.ones(
-        (height, width),
-        dtype=np.uint8
-    ) * 255
-
-    for face in detections:
-
-        x = int(face[0])
-        y = int(face[1])
-        w = int(face[2])
-        h = int(face[3])
-
-        padding_x = int(w * 0.7)
-        padding_y = int(h * 1.0)
-
-        x1 = max(
-            0,
-            x - padding_x
-        )
-
-        y1 = max(
-            0,
-            y - padding_y
-        )
-
-        x2 = min(
-            width,
-            x + w + padding_x
-        )
-
-        y2 = min(
-            height,
-            y + h + padding_y
-        )
-
-        mask[
-            y1:y2,
-            x1:x2
-        ] = 0
-
-    return mask
-
-
-# ============================================================
-# BACKGROUND ANALYSIS
-# ============================================================
-
-def analyze_background(
-    image,
-    detections
-):
-
-    height, width = image.shape[:2]
-
-    mask = create_face_mask(
-        image,
-        detections
-    )
-
-    border = max(
-        10,
-        int(
-            min(height, width) * 0.08
-        )
-    )
-
-    regions = [
-        (
-            image[:border, :],
-            mask[:border, :]
-        ),
-        (
-            image[
-                height - border:,
-                :
-            ],
-            mask[
-                height - border:,
-                :
-            ]
-        ),
-        (
-            image[:, :border],
-            mask[:, :border]
-        ),
-        (
-            image[
-                :,
-                width - border:
-            ],
-            mask[
-                :,
-                width - border:
-            ]
-        )
-    ]
-
-    scores = []
-
-    for region, region_mask in regions:
-
-        score = calculate_white_percentage(
-            region,
-            region_mask
-        )
-
-        if score is not None:
-            scores.append(score)
-
-    if not scores:
-
-        return {
-            "score": 0.0,
-            "passed": False
-        }
-
-    final_score = float(
-        np.mean(scores)
-    )
+    ratio = face_width / image_width
 
     passed = (
-        final_score >=
-        BACKGROUND_PASS_SCORE
-    )
-
-    return {
-        "score": final_score,
-        "passed": passed
-    }
-
-
-# ============================================================
-# POSITION ANALYSIS
-# ============================================================
-
-def analyze_position(
-    image,
-    face
-):
-
-    height, width = image.shape[:2]
-
-    x = float(face[0])
-    y = float(face[1])
-    w = float(face[2])
-    h = float(face[3])
-
-    center_x = x + (w / 2)
-    center_y = y + (h / 2)
-
-    image_center_x = width / 2
-
-    horizontal_offset = (
-        center_x -
-        image_center_x
-    ) / width
-
-    vertical_position = (
-        center_y / height
-    )
-
-    face_width_ratio = (
-        w / width
-    )
-
-    top_margin_ratio = (
-        y / height
-    )
-
-    horizontal_ok = (
-        abs(horizontal_offset)
-        <= MAX_HORIZONTAL_OFFSET
-    )
-
-    size_ok = (
         MIN_FACE_WIDTH_RATIO
-        <= face_width_ratio
+        <= ratio
         <= MAX_FACE_WIDTH_RATIO
     )
 
-    top_margin_ok = (
+    return passed, ratio
+
+
+# ============================================================
+# HELPER: CHECK TOP MARGIN
+# ============================================================
+
+def check_top_margin(
+    face_y,
+    image_height
+):
+    ratio = face_y / image_height
+
+    passed = (
         MIN_TOP_MARGIN_RATIO
-        <= top_margin_ratio
+        <= ratio
         <= MAX_TOP_MARGIN_RATIO
     )
 
-    vertical_ok = (
-        0.20
-        <= vertical_position
-        <= 0.65
-    )
-
-    passed = (
-        horizontal_ok
-        and size_ok
-        and top_margin_ok
-        and vertical_ok
-    )
-
-    return {
-
-        "passed": passed,
-
-        "horizontal_ok":
-            horizontal_ok,
-
-        "size_ok":
-            size_ok,
-
-        "top_margin_ok":
-            top_margin_ok,
-
-        "vertical_ok":
-            vertical_ok,
-
-        "horizontal_offset":
-            horizontal_offset,
-
-        "vertical_position":
-            vertical_position,
-
-        "face_width_ratio":
-            face_width_ratio,
-
-        "top_margin_ratio":
-            top_margin_ratio
-    }
+    return passed, ratio
 
 
 # ============================================================
-# MAIN ANALYZER
+# HELPER: CHECK VERTICAL POSITION
 # ============================================================
 
-def analyze_image(image):
+def check_vertical_position(
+    face_y,
+    face_height,
+    image_height
+):
+    face_center_y = face_y + (face_height / 2)
 
-    detections = detect_faces(
-        image
-    )
+    image_center_y = image_height / 2
 
-    face_count = len(
-        detections
-    )
+    offset = abs(
+        face_center_y - image_center_y
+    ) / image_height
 
-    one_person = (
-        face_count == 1
-    )
+    # Allow a reasonable vertical range.
+    # The top-margin check separately prevents
+    # the face from being too close to the top.
+    passed = offset <= 0.20
+
+    return passed, offset
+
+
+# ============================================================
+# ANALYZE IMAGE
+# ============================================================
+
+def analyze_image(image, filename):
+    height, width = image.shape[:2]
+
+    problems = []
 
     # --------------------------------------------------------
-    # POSITION
+    # FACE DETECTION
     # --------------------------------------------------------
 
-    if one_person:
+    faces = detect_faces(image)
 
-        position = analyze_position(
-            image,
-            detections[0]
+    faces_detected = len(faces)
+
+    if faces_detected == 1:
+        person = "PASS"
+    else:
+        person = "FAIL"
+
+        if faces_detected == 0:
+            problems.append({
+                "check": "Person",
+                "message": "No face was detected in the photo."
+            })
+
+        else:
+            problems.append({
+                "check": "Person",
+                "message": (
+                    f"{faces_detected} faces were detected. "
+                    "Exactly one person must be visible."
+                )
+            })
+
+
+    # Default values
+    horizontal_position = "FAIL"
+    face_size = "FAIL"
+    top_margin = "FAIL"
+    vertical_position = "FAIL"
+
+    horizontal_offset = None
+    face_width_ratio = None
+    top_margin_ratio = None
+    vertical_offset = None
+
+
+    # --------------------------------------------------------
+    # FACE-BASED CHECKS
+    # --------------------------------------------------------
+
+    if faces_detected == 1:
+
+        face = faces[0]
+
+        face_x = float(face[0])
+        face_y = float(face[1])
+        face_width = float(face[2])
+        face_height = float(face[3])
+
+
+        # ----------------------------------------------------
+        # HORIZONTAL POSITION
+        # ----------------------------------------------------
+
+        horizontal_passed, horizontal_offset = (
+            check_horizontal_position(
+                face_x,
+                face_width,
+                width
+            )
         )
 
-    else:
+        horizontal_position = (
+            "PASS"
+            if horizontal_passed
+            else "FAIL"
+        )
 
-        position = {
-            "passed": False,
-            "horizontal_ok": False,
-            "size_ok": False,
-            "top_margin_ok": False,
-            "vertical_ok": False,
-            "horizontal_offset": 0,
-            "vertical_position": 0,
-            "face_width_ratio": 0,
-            "top_margin_ratio": 0
-        }
+        if not horizontal_passed:
+
+            direction = (
+                "left"
+                if (
+                    face_x + face_width / 2
+                ) < width / 2
+                else "right"
+            )
+
+            problems.append({
+                "check": "Horizontal Position",
+                "message": (
+                    "Face is too far to the "
+                    f"{direction}. "
+                    "Please center your face horizontally."
+                )
+            })
+
+
+        # ----------------------------------------------------
+        # FACE SIZE
+        # ----------------------------------------------------
+
+        size_passed, face_width_ratio = (
+            check_face_size(
+                face_width,
+                width
+            )
+        )
+
+        face_size = (
+            "PASS"
+            if size_passed
+            else "FAIL"
+        )
+
+        if not size_passed:
+
+            if face_width_ratio < MIN_FACE_WIDTH_RATIO:
+                problems.append({
+                    "check": "Face Size",
+                    "message": (
+                        "Face is too small. "
+                        "Move closer to the camera."
+                    )
+                })
+
+            else:
+                problems.append({
+                    "check": "Face Size",
+                    "message": (
+                        "Face is too large. "
+                        "Move slightly farther from the camera."
+                    )
+                })
+
+
+        # ----------------------------------------------------
+        # TOP MARGIN
+        # ----------------------------------------------------
+
+        top_passed, top_margin_ratio = (
+            check_top_margin(
+                face_y,
+                height
+            )
+        )
+
+        top_margin = (
+            "PASS"
+            if top_passed
+            else "FAIL"
+        )
+
+        if not top_passed:
+
+            if top_margin_ratio < MIN_TOP_MARGIN_RATIO:
+
+                problems.append({
+                    "check": "Top Margin",
+                    "message": (
+                        "There is not enough space above "
+                        "the head. Move the camera/photo "
+                        "framing slightly upward."
+                    )
+                })
+
+            else:
+
+                problems.append({
+                    "check": "Top Margin",
+                    "message": (
+                        "There is too much empty space "
+                        "above the head. Adjust the framing."
+                    )
+                })
+
+
+        # ----------------------------------------------------
+        # VERTICAL POSITION
+        # ----------------------------------------------------
+
+        vertical_passed, vertical_offset = (
+            check_vertical_position(
+                face_y,
+                face_height,
+                height
+            )
+        )
+
+        vertical_position = (
+            "PASS"
+            if vertical_passed
+            else "FAIL"
+        )
+
+        if not vertical_passed:
+
+            direction = (
+                "up"
+                if (
+                    face_y + face_height / 2
+                ) < height / 2
+                else "down"
+            )
+
+            problems.append({
+                "check": "Vertical Position",
+                "message": (
+                    "Face is positioned too far "
+                    f"{direction}. Please adjust the "
+                    "vertical framing."
+                )
+            })
+
 
     # --------------------------------------------------------
     # BACKGROUND
     # --------------------------------------------------------
 
-    background = analyze_background(
-        image,
-        detections
+    background_score = calculate_background_score(image)
+
+    background = (
+        "PASS"
+        if background_score >= BACKGROUND_PASS_SCORE
+        else "FAIL"
     )
 
+    if background == "FAIL":
+
+        problems.append({
+            "check": "Background",
+            "message": (
+                f"Background is not white enough. "
+                f"Detected {background_score:.2f}% white-ish "
+                f"background, but at least "
+                f"{BACKGROUND_PASS_SCORE:.0f}% is required."
+            )
+        })
+
+
     # --------------------------------------------------------
-    # FINAL
+    # OVERALL
     # --------------------------------------------------------
 
-    overall_pass = (
-        one_person
-        and position["passed"]
-        and background["passed"]
+    overall = (
+        "PASS"
+        if (
+            faces_detected == 1
+            and horizontal_position == "PASS"
+            and face_size == "PASS"
+            and top_margin == "PASS"
+            and vertical_position == "PASS"
+            and background == "PASS"
+        )
+        else "FAIL"
     )
 
-    return {
 
-        "faces_detected":
-            face_count,
+    # --------------------------------------------------------
+    # RESULT
+    # --------------------------------------------------------
 
-        "person":
-            "PASS"
-            if one_person
-            else "FAIL",
+    result = {
+        "faces_detected": faces_detected,
 
-        "position":
-            "PASS"
-            if position["passed"]
-            else "FAIL",
-
-        "background":
-            "PASS"
-            if background["passed"]
-            else "FAIL",
-
-        "background_score":
-            round(
-                background["score"],
-                2
-            ),
+        "person": person,
 
         "horizontal_position":
-            "PASS"
-            if position["horizontal_ok"]
-            else "FAIL",
+            horizontal_position,
 
         "face_size":
-            "PASS"
-            if position["size_ok"]
-            else "FAIL",
+            face_size,
 
         "top_margin":
-            "PASS"
-            if position["top_margin_ok"]
-            else "FAIL",
+            top_margin,
 
         "vertical_position":
-            "PASS"
-            if position["vertical_ok"]
-            else "FAIL",
+            vertical_position,
+
+        "background":
+            background,
+
+        "background_score":
+            background_score,
 
         "overall":
-            "PASS"
-            if overall_pass
-            else "FAIL"
+            overall,
+
+        "filename":
+            filename,
+
+        "problems":
+            problems
     }
 
 
+    return result
+
+
 # ============================================================
-# WEB API
+# ANALYZE ENDPOINT
 # ============================================================
-
-@app.get("/")
-def home():
-
-    return {
-        "status": "online",
-        "service": "Student Photo Analyzer"
-    }
-
 
 @app.post("/analyze")
-async def analyze_photo(
-    file: UploadFile = File(...)
-):
+async def analyze(file: UploadFile = File(...)):
+
+    temp_path = None
 
     try:
 
-        image_bytes = await file.read()
+        # ----------------------------------------------------
+        # READ FILE
+        # ----------------------------------------------------
+
+        contents = await file.read()
+
+        if not contents:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "Uploaded file is empty."
+                }
+            )
+
+
+        # ----------------------------------------------------
+        # CONVERT TO NUMPY
+        # ----------------------------------------------------
 
         image_array = np.frombuffer(
-            image_bytes,
+            contents,
             dtype=np.uint8
         )
 
@@ -519,27 +565,44 @@ async def analyze_photo(
             cv2.IMREAD_COLOR
         )
 
+
         if image is None:
 
             return JSONResponse(
                 status_code=400,
                 content={
-                    "error":
-                        "Could not read image."
+                    "error": (
+                        "The uploaded file could not "
+                        "be read as an image."
+                    )
                 }
             )
 
+
+        # ----------------------------------------------------
+        # ANALYZE
+        # ----------------------------------------------------
+
+        filename = file.filename or "unknown"
+
         result = analyze_image(
-            image
+            image,
+            filename
         )
 
-        result["filename"] = (
-            file.filename
+
+        return JSONResponse(
+            status_code=200,
+            content=result
         )
 
-        return result
 
     except Exception as error:
+
+        print(
+            "ANALYZER ERROR:",
+            repr(error)
+        )
 
         return JSONResponse(
             status_code=500,
@@ -547,3 +610,14 @@ async def analyze_photo(
                 "error": str(error)
             }
         )
+
+
+    finally:
+
+        if temp_path and os.path.exists(temp_path):
+
+            try:
+                os.remove(temp_path)
+
+            except Exception:
+                pass
