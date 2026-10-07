@@ -13,7 +13,7 @@ import threading
 app = FastAPI(
     title="Student Photo Analyzer",
     description="Automatic student photo validation API",
-    version="9.0"
+    version="9.1-test"
 )
 
 
@@ -39,14 +39,10 @@ MAX_TOP_MARGIN_RATIO = 0.40
 
 MAX_VERTICAL_OFFSET = 0.20
 
-# Maximum compressed upload size.
-# 15 MB is more than enough for a normal student photograph.
 MAX_UPLOAD_SIZE = 15 * 1024 * 1024
 
-# Maximum dimensions used for actual analysis.
 MAX_IMAGE_DIMENSION = 1800
 
-# Smaller image used for background calculation.
 BACKGROUND_ANALYSIS_SIZE = 900
 
 
@@ -54,7 +50,9 @@ BACKGROUND_ANALYSIS_SIZE = 900
 # MODEL
 # ============================================================
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
 
 MODEL_PATH = os.path.join(
     BASE_DIR,
@@ -68,6 +66,7 @@ MODEL_PATH = os.path.join(
 # ============================================================
 
 if not os.path.exists(MODEL_PATH):
+
     raise FileNotFoundError(
         "YuNet model not found: " + MODEL_PATH
     )
@@ -82,7 +81,7 @@ face_detector = cv2.FaceDetectorYN.create(
     5000
 )
 
-# Prevent simultaneous access to the native detector.
+
 detector_lock = threading.Lock()
 
 
@@ -96,33 +95,170 @@ def root():
     return {
         "status": "online",
         "service": "Student Photo Analyzer",
-        "version": "9.0"
+        "version": "9.1-test"
     }
+
+
+# ============================================================
+# TEMPORARY UPLOAD TEST
+# ============================================================
+#
+# IMPORTANT:
+# This endpoint does NOT:
+# - decode the image
+# - run OpenCV
+# - run YuNet
+# - calculate background
+# - perform any photo validation
+#
+# It ONLY checks whether the multipart upload from
+# Google Apps Script actually reaches FastAPI.
+#
+# ============================================================
+
+@app.post("/analyze-test")
+async def analyze_test(
+    file: UploadFile = File(...)
+):
+
+    print("")
+    print("========================================")
+    print("TEMPORARY ANALYZE-TEST REQUEST RECEIVED")
+    print("========================================")
+
+    print(
+        "Filename:",
+        file.filename
+    )
+
+    print(
+        "Content Type:",
+        file.content_type
+    )
+
+
+    try:
+
+        # Read the uploaded file in small chunks.
+        # We do this only to determine its size.
+        total_size = 0
+
+        while True:
+
+            chunk = await file.read(
+                1024 * 1024
+            )
+
+            if not chunk:
+                break
+
+            total_size += len(chunk)
+
+
+        print(
+            "Upload Size:",
+            total_size,
+            "bytes"
+        )
+
+        print(
+            "========================================"
+        )
+
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "test": "SUCCESS",
+                "message":
+                    "The upload successfully reached FastAPI.",
+
+                "filename":
+                    file.filename,
+
+                "content_type":
+                    file.content_type,
+
+                "size_bytes":
+                    total_size
+            }
+        )
+
+
+    except Exception as error:
+
+        print(
+            "ANALYZE-TEST ERROR:",
+            repr(error)
+        )
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "test": "FAIL",
+
+                "message":
+                    "The request reached FastAPI, "
+                    "but reading the uploaded file failed.",
+
+                "error":
+                    str(error)
+            }
+        )
+
+
+    finally:
+
+        try:
+            await file.close()
+
+        except Exception:
+            pass
 
 
 # ============================================================
 # HELPER: CLEAN FAIL RESULT
 # ============================================================
 
-def fail_result(filename, problems):
+def fail_result(
+    filename,
+    problems
+):
 
     return {
-        "faces_detected": 0,
-        "person": "FAIL",
 
-        "horizontal_position": "FAIL",
-        "face_size": "FAIL",
-        "top_margin": "FAIL",
-        "vertical_position": "FAIL",
+        "faces_detected":
+            0,
 
-        "background": "FAIL",
-        "background_score": 0.0,
+        "person":
+            "FAIL",
 
-        "overall": "FAIL",
+        "horizontal_position":
+            "FAIL",
 
-        "filename": filename,
+        "face_size":
+            "FAIL",
 
-        "problems": problems
+        "top_margin":
+            "FAIL",
+
+        "vertical_position":
+            "FAIL",
+
+        "background":
+            "FAIL",
+
+        "background_score":
+            0.0,
+
+        "overall":
+            "FAIL",
+
+        "filename":
+            filename,
+
+        "problems":
+            problems
     }
 
 
@@ -136,7 +272,10 @@ def detect_faces(image):
 
         height, width = image.shape[:2]
 
-        if width <= 0 or height <= 0:
+        if (
+            width <= 0
+            or height <= 0
+        ):
 
             return []
 
@@ -147,7 +286,9 @@ def detect_faces(image):
                 (width, height)
             )
 
-            _, faces = face_detector.detect(image)
+            _, faces = (
+                face_detector.detect(image)
+            )
 
 
         if faces is None:
@@ -178,7 +319,8 @@ def resize_for_analysis(image):
 
     if (
         height <= MAX_IMAGE_DIMENSION
-        and width <= MAX_IMAGE_DIMENSION
+        and
+        width <= MAX_IMAGE_DIMENSION
     ):
 
         return image
@@ -189,23 +331,27 @@ def resize_for_analysis(image):
         MAX_IMAGE_DIMENSION / height
     )
 
+
     new_width = max(
         1,
         int(width * scale)
     )
+
 
     new_height = max(
         1,
         int(height * scale)
     )
 
-    resized = cv2.resize(
+
+    return cv2.resize(
         image,
-        (new_width, new_height),
+        (
+            new_width,
+            new_height
+        ),
         interpolation=cv2.INTER_AREA
     )
-
-    return resized
 
 
 # ============================================================
@@ -218,14 +364,13 @@ def calculate_background_score(image):
 
         height, width = image.shape[:2]
 
-        # Use a smaller image for background analysis.
-        # This dramatically reduces memory usage.
 
         scale = min(
             1.0,
             BACKGROUND_ANALYSIS_SIZE / width,
             BACKGROUND_ANALYSIS_SIZE / height
         )
+
 
         if scale < 1.0:
 
@@ -234,14 +379,19 @@ def calculate_background_score(image):
                 int(width * scale)
             )
 
+
             new_height = max(
                 1,
                 int(height * scale)
             )
 
+
             image = cv2.resize(
                 image,
-                (new_width, new_height),
+                (
+                    new_width,
+                    new_height
+                ),
                 interpolation=cv2.INTER_AREA
             )
 
@@ -251,16 +401,19 @@ def calculate_background_score(image):
             cv2.COLOR_BGR2RGB
         )
 
+
         brightness = np.mean(
             rgb,
             axis=2
         )
+
 
         color_difference = (
             np.max(rgb, axis=2)
             -
             np.min(rgb, axis=2)
         )
+
 
         white_mask = (
             (brightness >= WHITE_BRIGHTNESS)
@@ -271,11 +424,13 @@ def calculate_background_score(image):
             )
         )
 
+
         score = (
             np.sum(white_mask)
             /
             white_mask.size
         ) * 100.0
+
 
         return round(
             float(score),
@@ -306,12 +461,14 @@ def check_horizontal_position(
     face_center_x = (
         face_x
         +
-        (face_width / 2)
+        face_width / 2
     )
+
 
     image_center_x = (
         image_width / 2
     )
+
 
     offset = (
         abs(
@@ -323,11 +480,13 @@ def check_horizontal_position(
         image_width
     )
 
+
     passed = (
         offset
         <=
         MAX_HORIZONTAL_OFFSET
     )
+
 
     return passed, offset
 
@@ -347,6 +506,7 @@ def check_face_size(
         image_width
     )
 
+
     passed = (
         MIN_FACE_WIDTH_RATIO
         <=
@@ -354,6 +514,7 @@ def check_face_size(
         <=
         MAX_FACE_WIDTH_RATIO
     )
+
 
     return passed, ratio
 
@@ -373,6 +534,7 @@ def check_top_margin(
         image_height
     )
 
+
     passed = (
         MIN_TOP_MARGIN_RATIO
         <=
@@ -380,6 +542,7 @@ def check_top_margin(
         <=
         MAX_TOP_MARGIN_RATIO
     )
+
 
     return passed, ratio
 
@@ -397,12 +560,14 @@ def check_vertical_position(
     face_center_y = (
         face_y
         +
-        (face_height / 2)
+        face_height / 2
     )
+
 
     image_center_y = (
         image_height / 2
     )
+
 
     offset = (
         abs(
@@ -414,11 +579,13 @@ def check_vertical_position(
         image_height
     )
 
+
     passed = (
         offset
         <=
         MAX_VERTICAL_OFFSET
     )
+
 
     return passed, offset
 
@@ -434,9 +601,6 @@ def analyze_image(
 
     problems = []
 
-    # --------------------------------------------------------
-    # IMAGE DIMENSIONS
-    # --------------------------------------------------------
 
     if image is None:
 
@@ -453,6 +617,7 @@ def analyze_image(
 
 
     height, width = image.shape[:2]
+
 
     if (
         width <= 0
@@ -483,12 +648,14 @@ def analyze_image(
 
         height, width = image.shape[:2]
 
+
     except Exception as error:
 
         print(
             "RESIZE ERROR:",
             repr(error)
         )
+
 
         return fail_result(
             filename,
@@ -506,31 +673,43 @@ def analyze_image(
     # FACE DETECTION
     # --------------------------------------------------------
 
-    faces = detect_faces(image)
+    faces = detect_faces(
+        image
+    )
 
-    faces_detected = len(faces)
+
+    faces_detected = len(
+        faces
+    )
 
 
     if faces_detected == 1:
 
         person = "PASS"
 
+
     else:
 
         person = "FAIL"
 
+
         if faces_detected == 0:
 
             problems.append({
-                "check": "Person",
+                "check":
+                    "Person",
+
                 "message":
                     "No face was detected in the photo."
             })
 
+
         else:
 
             problems.append({
-                "check": "Person",
+                "check":
+                    "Person",
+
                 "message":
                     f"{faces_detected} faces were detected. "
                     "Exactly one person must be visible."
@@ -544,28 +723,35 @@ def analyze_image(
     top_margin = "FAIL"
     vertical_position = "FAIL"
 
-    horizontal_offset = None
-    face_width_ratio = None
-    top_margin_ratio = None
-    vertical_offset = None
-
 
     # --------------------------------------------------------
-    # FACE BASED CHECKS
+    # FACE CHECKS
     # --------------------------------------------------------
 
     if faces_detected == 1:
 
         face = faces[0]
 
-        face_x = float(face[0])
-        face_y = float(face[1])
-        face_width = float(face[2])
-        face_height = float(face[3])
+
+        face_x = float(
+            face[0]
+        )
+
+        face_y = float(
+            face[1]
+        )
+
+        face_width = float(
+            face[2]
+        )
+
+        face_height = float(
+            face[3]
+        )
 
 
         # ----------------------------------------------------
-        # HORIZONTAL POSITION
+        # HORIZONTAL
         # ----------------------------------------------------
 
         horizontal_passed, horizontal_offset = (
@@ -575,6 +761,7 @@ def analyze_image(
                 width
             )
         )
+
 
         horizontal_position = (
             "PASS"
@@ -598,6 +785,7 @@ def analyze_image(
                 "right"
             )
 
+
             problems.append({
                 "check":
                     "Horizontal Position",
@@ -619,6 +807,7 @@ def analyze_image(
                 width
             )
         )
+
 
         face_size = (
             "PASS"
@@ -644,6 +833,7 @@ def analyze_image(
                         "Move closer to the camera."
                 })
 
+
             else:
 
                 problems.append({
@@ -666,6 +856,7 @@ def analyze_image(
                 height
             )
         )
+
 
         top_margin = (
             "PASS"
@@ -692,6 +883,7 @@ def analyze_image(
                         "framing slightly upward."
                 })
 
+
             else:
 
                 problems.append({
@@ -705,7 +897,7 @@ def analyze_image(
 
 
         # ----------------------------------------------------
-        # VERTICAL POSITION
+        # VERTICAL
         # ----------------------------------------------------
 
         vertical_passed, vertical_offset = (
@@ -715,6 +907,7 @@ def analyze_image(
                 height
             )
         )
+
 
         vertical_position = (
             "PASS"
@@ -738,6 +931,7 @@ def analyze_image(
                 "down"
             )
 
+
             problems.append({
                 "check":
                     "Vertical Position",
@@ -758,6 +952,7 @@ def analyze_image(
             image
         )
     )
+
 
     background = (
         "PASS"
@@ -845,7 +1040,7 @@ def analyze_image(
 
 
 # ============================================================
-# ANALYZE ENDPOINT
+# REAL ANALYZE ENDPOINT
 # ============================================================
 
 @app.post("/analyze")
@@ -870,21 +1065,29 @@ async def analyze(
 
         total_size = 0
 
+
         while True:
 
             chunk = await file.read(
                 1024 * 1024
             )
 
+
             if not chunk:
+
                 break
 
-            total_size += len(chunk)
 
-            # Stop before an enormous upload
-            # consumes too much memory.
+            total_size += len(
+                chunk
+            )
 
-            if total_size > MAX_UPLOAD_SIZE:
+
+            if (
+                total_size
+                >
+                MAX_UPLOAD_SIZE
+            ):
 
                 print(
                     "UPLOAD TOO LARGE:",
@@ -892,11 +1095,14 @@ async def analyze(
                     total_size
                 )
 
+
                 result = fail_result(
                     filename,
                     [
                         {
-                            "check": "Image",
+                            "check":
+                                "Image",
+
                             "message":
                                 "The uploaded image file is too large. "
                                 "Please upload a smaller photo."
@@ -904,12 +1110,16 @@ async def analyze(
                     ]
                 )
 
+
                 return JSONResponse(
                     status_code=200,
                     content=result
                 )
 
-            chunks.append(chunk)
+
+            chunks.append(
+                chunk
+            )
 
 
         if total_size == 0:
@@ -918,12 +1128,15 @@ async def analyze(
                 filename,
                 [
                     {
-                        "check": "Image",
+                        "check":
+                            "Image",
+
                         "message":
                             "The uploaded file is empty."
                     }
                 ]
             )
+
 
             return JSONResponse(
                 status_code=200,
@@ -935,12 +1148,12 @@ async def analyze(
             chunks
         )
 
-        # Release chunk list immediately.
+
         chunks.clear()
 
 
         # ----------------------------------------------------
-        # DECODE IMAGE
+        # DECODE
         # ----------------------------------------------------
 
         image_array = np.frombuffer(
@@ -948,13 +1161,13 @@ async def analyze(
             dtype=np.uint8
         )
 
+
         image = cv2.imdecode(
             image_array,
             cv2.IMREAD_COLOR
         )
 
 
-        # Release encoded image data.
         del image_array
         del contents
 
@@ -965,7 +1178,9 @@ async def analyze(
                 filename,
                 [
                     {
-                        "check": "Image",
+                        "check":
+                            "Image",
+
                         "message":
                             "The uploaded file is not a valid "
                             "readable image."
@@ -973,55 +1188,11 @@ async def analyze(
                 ]
             )
 
-            return JSONResponse(
-                status_code=200,
-                content=result
-            )
-
-
-        # ----------------------------------------------------
-        # CHECK ORIGINAL DIMENSIONS
-        # ----------------------------------------------------
-
-        original_height, original_width = (
-            image.shape[:2]
-        )
-
-
-        if (
-            original_width <= 0
-            or
-            original_height <= 0
-        ):
-
-            result = fail_result(
-                filename,
-                [
-                    {
-                        "check": "Image",
-                        "message":
-                            "The uploaded image has invalid dimensions."
-                    }
-                ]
-            )
 
             return JSONResponse(
                 status_code=200,
                 content=result
             )
-
-
-        print(
-            "ANALYZING:",
-            filename,
-            "|",
-            original_width,
-            "x",
-            original_height,
-            "|",
-            total_size,
-            "bytes"
-        )
 
 
         # ----------------------------------------------------
@@ -1034,7 +1205,6 @@ async def analyze(
         )
 
 
-        # Explicitly release image
         del image
 
 
@@ -1051,21 +1221,21 @@ async def analyze(
             repr(error)
         )
 
-        # IMPORTANT:
-        # Even unexpected Python errors become a normal
-        # FAIL response instead of HTTP 500/502.
 
         result = fail_result(
             filename,
             [
                 {
-                    "check": "Analyzer",
+                    "check":
+                        "Analyzer",
+
                     "message":
                         "The photo could not be analyzed safely. "
                         "Please upload a different photo."
                 }
             ]
         )
+
 
         return JSONResponse(
             status_code=200,
@@ -1076,6 +1246,9 @@ async def analyze(
     finally:
 
         try:
+
             await file.close()
+
         except Exception:
+
             pass
